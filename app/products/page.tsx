@@ -9,89 +9,112 @@ import { createClient } from "@/lib/supabase/client"
 import type { Product } from "@/lib/types"
 import { useLanguage } from "@/hooks/use-language"
 import { Filter, Grid, List } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect, useState, useMemo } from "react"
 import useSWR from "swr"
 
-const fetcher = async () => {
+const ITEMS_PER_PAGE = 20
+
+const fetcher = async ([
+  key,
+  page,
+  sortBy,
+  searchTerm,
+  selectedCategories,
+]: [
+  string,
+  number,
+  string,
+  string,
+  string[],
+]) => {
   const supabase = createClient()
-  const { data, error } = await supabase
+  const from = page * ITEMS_PER_PAGE
+  const to = from + ITEMS_PER_PAGE - 1
+
+  let query = supabase
     .from("products")
     .select(`
       *,
       category:categories(*)
-    `)
+    `, { count: 'exact' })
     .eq("active", true)
-    .order("created_at", { ascending: false })
+
+  // Apply search filter
+  if (searchTerm) {
+    query = query.or(`name.ilike.%${searchTerm}%,description.ilike.%${searchTerm}%`)
+  }
+
+  // Apply category filter
+  if (selectedCategories.length > 0) {
+    query = query.in("category_id", selectedCategories)
+  }
+
+  // Apply sorting
+  switch (sortBy) {
+    case "price_low":
+      query = query.order("price", { ascending: true })
+      break
+    case "price_high":
+      query = query.order("price", { ascending: false })
+      break
+    case "name_asc":
+      query = query.order("name", { ascending: true })
+      break
+    case "name_desc":
+      query = query.order("name", { ascending: false })
+      break
+    case "oldest":
+      query = query.order("created_at", { ascending: true })
+      break
+    case "newest":
+    default:
+      query = query.order("created_at", { ascending: false })
+      break
+  }
+
+  const { data, error, count } = await query.range(from, to)
 
   if (error) throw error
-  return data as Product[]
+  return { data: data as Product[], count }
 }
 
 export default function ProductsPage() {
   const { language } = useLanguage()
-  const { data: allProducts, isLoading } = useSWR("all_products", fetcher)
-  const [filteredProducts, setFilteredProducts] = useState<Product[]>([])
+  const [currentPage, setCurrentPage] = useState(0)
+  const [sortBy, setSortBy] = useState("newest")
+  const [searchTerm, setSearchTerm] = useState("")
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([])
+  const { data, isLoading } = useSWR(
+    ['products', currentPage, sortBy, searchTerm, selectedCategories],
+    fetcher,
+  )
+  
+  const allProducts = useMemo(() => data?.data || [], [data])
+  const totalProducts = useMemo(() => data?.count || 0, [data])
+
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [isFilterOpen, setIsFilterOpen] = useState(false)
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid")
 
-  // Filter states
-  const [searchTerm, setSearchTerm] = useState("")
-  const [sortBy, setSortBy] = useState("newest")
-  const [selectedCategories, setSelectedCategories] = useState<string[]>([])
-
-  // Apply filters and sorting
   useEffect(() => {
-    if (!allProducts) return
+    setCurrentPage(0)
+  }, [sortBy, searchTerm, selectedCategories])
 
-    let filtered = [...allProducts]
-
-    // Apply search filter
-    if (searchTerm) {
-      filtered = filtered.filter(
-        (product) =>
-          product.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          product.description?.toLowerCase().includes(searchTerm.toLowerCase()),
-      )
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo(0, 0)
     }
-
-    // Apply category filter
-    if (selectedCategories.length > 0) {
-      filtered = filtered.filter((product) => product.category_id && selectedCategories.includes(product.category_id))
-    }
-
-    // Apply sorting
-    switch (sortBy) {
-      case "newest":
-        filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-        break
-      case "oldest":
-        filtered.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-        break
-      case "price_low":
-        filtered.sort((a, b) => (a.price || 0) - (b.price || 0))
-        break
-      case "price_high":
-        filtered.sort((a, b) => (b.price || 0) - (a.price || 0))
-        break
-      case "name_asc":
-        filtered.sort((a, b) => a.name.localeCompare(b.name))
-        break
-      case "name_desc":
-        filtered.sort((a, b) => b.name.localeCompare(a.name))
-        break
-    }
-
-    setFilteredProducts(filtered)
-  }, [allProducts, searchTerm, sortBy, selectedCategories])
+  }, [currentPage])
 
   const clearFilters = () => {
     setSearchTerm("")
     setSortBy("newest")
     setSelectedCategories([])
   }
+  
+  const totalPages = Math.ceil(totalProducts / ITEMS_PER_PAGE)
 
-  if (isLoading) {
+  if (isLoading && allProducts.length === 0) {
     return (
       <div className="container mx-auto px-4 py-8">
         <div className="flex flex-col lg:flex-row gap-8">
@@ -132,7 +155,7 @@ export default function ProductsPage() {
         <div className="flex flex-col lg:flex-row gap-8">
           {/* Desktop Sidebar */}
           <div className="hidden lg:block lg:w-1/4">
-            <div className="sticky top-24">
+            <div className="sticky top-24 max-h-[calc(100vh-7rem)] pr-4 overflow-y-auto">
               <FilterSidebar
                 searchTerm={searchTerm}
                 onSearchChange={setSearchTerm}
@@ -193,13 +216,13 @@ export default function ProductsPage() {
             <div className="mb-6">
               <p className="text-sm text-muted-foreground">
                 {language === "id"
-                  ? `Menampilkan ${filteredProducts.length} dari ${allProducts?.length || 0} produk`
-                  : `Showing ${filteredProducts.length} of ${allProducts?.length || 0} products`}
+                  ? `Menampilkan ${allProducts.length} dari ${totalProducts || 0} produk`
+                  : `Showing ${allProducts.length} of ${totalProducts || 0} products`}
               </p>
             </div>
 
             {/* Products Grid */}
-            {filteredProducts.length === 0 ? (
+            {allProducts.length === 0 && !isLoading ? (
               <div className="text-center py-12">
                 <p className="text-lg text-muted-foreground mb-4">
                   {language === "id" ? "Tidak ada produk ditemukan" : "No products found"}
@@ -209,15 +232,35 @@ export default function ProductsPage() {
                 </Button>
               </div>
             ) : (
-              <div
-                className={`grid gap-6 ${
-                  viewMode === "grid" ? "grid-cols-1 md:grid-cols-2 xl:grid-cols-3" : "grid-cols-1"
-                }`}
-              >
-                {filteredProducts.map((product) => (
-                  <ProductCard key={product.id} product={product} onViewDetails={setSelectedProduct} />
-                ))}
-              </div>
+              <>
+                <div
+                  className={`grid gap-6 ${
+                    viewMode === "grid" ? "grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5" : "grid-cols-1"
+                  }`}
+                >
+                  {allProducts.map((product) => (
+                    <ProductCard key={product.id} product={product} onViewDetails={setSelectedProduct} />
+                  ))}
+                </div>
+                {/* Pagination Controls */}
+                <div className="flex justify-center items-center mt-8 space-x-4">
+                  <Button
+                    onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
+                    disabled={currentPage === 0}
+                  >
+                    {language === "id" ? "Sebelumnya" : "Previous"}
+                  </Button>
+                  <span className="text-sm">
+                    {language === "id" ? `Halaman ${currentPage + 1} dari ${totalPages}` : `Page ${currentPage + 1} of ${totalPages}`}
+                  </span>
+                  <Button
+                    onClick={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
+                    disabled={currentPage >= totalPages - 1}
+                  >
+                    {language === "id" ? "Berikutnya" : "Next"}
+                  </Button>
+                </div>
+              </>
             )}
           </div>
         </div>
